@@ -1,7 +1,6 @@
 import modal
-import cv2
 
-scrape_image = modal.Image.debian_slim().pip_install("opencv-python")
+scrape_image = modal.Image.debian_slim().pip_install("opencv-python-headless")
 
 app = modal.App("score-scrape")
 
@@ -10,17 +9,20 @@ app = modal.App("score-scrape")
     mounts=[
         modal.Mount.from_local_file(
             local_path="~/score-scrape/sample-vid.mp4",
-            remote_path="/root/sample-vid.mp4",
+            remote_path="/sample-vid.mp4",
         ),
     ],
 )
 def scrape_score():
-    cap = cv2.VideoCapture("/root/sample-vid.mp4")
+    import cv2
+
+    cap = cv2.VideoCapture("/sample-vid.mp4")
     frame_count = 0
     while True:
         frame_count += 1
-        video_over, frame = cap.read()
-        if video_over:
+
+        more_video_left, frame = cap.read()
+        if not more_video_left:
             break
         
         # The videos are 30 fps, so this snaps a frame every 2 seconds.
@@ -28,9 +30,11 @@ def scrape_score():
             continue
         
         # Save the frame to a file.
-        cv2.imwrite(f"/root/raw_frames/frame_{frame_count // 60}.jpg", frame)
+        cv2.imwrite(f"/raw_frames/frame_{frame_count // 60}.jpg", frame)
     
     cap.release()
+
+    return frame_count // 60
 
 @app.local_entrypoint()
 def main():
