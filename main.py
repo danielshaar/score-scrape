@@ -1,22 +1,19 @@
 import modal
+from pathlib import Path
 
 scrape_image = modal.Image.debian_slim().pip_install("opencv-python-headless")
 
 app = modal.App("score-scrape")
 
-@app.function(
-    image=scrape_image,
-    mounts=[
-        modal.Mount.from_local_file(
-            local_path="~/score-scrape/sample-vid.mp4",
-            remote_path="/sample-vid.mp4",
-        ),
-    ],
-)
-def scrape_score():
+@app.function(image=scrape_image)
+def scrape_score(filename, video_bytes):
     import cv2
 
-    cap = cv2.VideoCapture("/sample-vid.mp4")
+    file_path = Path(f"/videos/{filename}")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(video_bytes)
+
+    cap = cv2.VideoCapture(file_path)
     frame_count = 0
     while True:
         frame_count += 1
@@ -37,5 +34,6 @@ def scrape_score():
     return frame_count // 60
 
 @app.local_entrypoint()
-def main():
-    print(scrape_score.remote())
+def main(filename):
+    file_path = Path(filename)
+    print(scrape_score.remote(file_path.name, file_path.read_bytes()))
