@@ -38,15 +38,17 @@ class Model:
         print("generating masks")
 
         masks, boxes, phrases, logits = self.model.predict(image_pil, text_prompt)
-        stacked = zip(masks, boxes, phrases, logits)
-        stacked = sorted(stacked, key=lambda x: x[3], reverse=True)
-        masks, boxes, phrases, logits = zip(*stacked)
+        scores = [logits[k] * boxes[k][2] * boxes[k][3] for k in range(len(boxes))]
+        stacked = zip(masks, boxes, phrases, logits, scores)
+        stacked = sorted(stacked, key=lambda x: x[1][2] * x[1][3], reverse=True)
+        masks, boxes, phrases, logits, scores = zip(*stacked)
 
         print("masks generated")
         print(logits)
         #print(masks)
         print(boxes)
         print(phrases)
+        print(scores)
         box = [round(x) for x in boxes[0].tolist()]
         return {"rect": box, "logit": float(logits[0])}
 
