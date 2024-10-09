@@ -110,62 +110,54 @@ def crop_and_dedupe_frames(frames, bboxes):
     return unique_score_images
 
 
-def resize_image(img, target_width):
-        img_w, img_h = img.size
-        if img_w > target_width:
-            scale_factor = target_width / img_w
-            img_w = target_width
-            img_h = int(img_h * scale_factor)
-            img = img.resize((int(img_w), img_h), Image.LANCZOS)
-        return img
+def scale_to_page(score_image, page_w):
+    w, h = score_image.size
+    new_w = 0.95 * page_w
+    new_h = h * new_w / w
+    return score_image.resize((int(new_w), int(new_h)), Image.LANCZOS)
+
+
+def draw_page(c, page_images, page_h_left):
+    from reportlab.lib.pagesizes import A4
+
+    page_w, page_h = A4
+
+    h_offset = page_h - 0.5 * page_h_left
+    for page_image in page_images:
+        w, h = page_image.size
+        h_offset -= h
+        c.drawInlineImage(page_image, 0.025 * page_w, h_offset, width=w, height=h)
 
 
 def stitch_pdf(unique_score_images):
-    import os
-    import tempfile
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import mm
-    from reportlab.lib.pagesizes import A4
     from io import BytesIO
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
 
-    # Create a new PDF
-    pdf_filename = "stitched_image.pdf"
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
-    pdf_w, pdf_h = A4
+    page_w, page_h = A4
 
-    # Initialize variables
-    page_height_left = pdf_h
-    page_number = 1
+    page_h_left = page_h
+    page_images = []
+    for score_image in unique_score_images:
+        score_image = scale_to_page(score_image, page_w)
+        w, h = score_image.size
 
-    for img in unique_score_images:
-        # Resize the image to the width of the PDF page
-        img = resize_image(img, pdf_w)
-        img_w, img_h = img.size
-
-        # Check if there's enough space on the current page
-        if page_height_left - img_h < 0:
-            # If not enough space, start a new page and reset the page_height_left
+        # If we can't fit another image on the page, draw the page.
+        if page_h_left - h < 0:
+            draw_page(c, page_images, page_h_left)
             c.showPage()
-            page_height_left = pdf_h
-            page_number += 1
+            page_h_left = page_h
+            page_images = []
+        
+        page_h_left -= h
+        page_images.append(score_image)
+    
+    # Draw the last page.
+    if page_images:
+        draw_page(c, page_images, page_h_left)
 
-        # Save the image to a temporary file
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
-            img.save(temp_file.name, format="PNG")
-
-            # Draw the image on the PDF on the current page
-            c.drawImage(
-                temp_file.name, 0, page_height_left - img_h, width=img_w, height=img_h
-            )
-
-        # Remove the temporary file
-        os.unlink(temp_file.name)
-
-        # Update page_height_left for the next image
-        page_height_left -= img_h
-
-    # Save the PDF
     c.save()
     pdf_bytes = buffer.getvalue()
     buffer.close()
