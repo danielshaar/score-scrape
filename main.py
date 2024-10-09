@@ -17,7 +17,7 @@ with segment_image.imports():
     from PIL import Image
 
 
-@app.cls(keep_warm=1, gpu="A100", image=segment_image, volumes={"/mods": modal.Volume.from_name("mods")})
+@app.cls(keep_warm=1, concurrency_limit=20, gpu="A100", image=segment_image, volumes={"/mods": modal.Volume.from_name("mods")})
 class Model:
     @modal.enter()
     def load_model(self):
@@ -28,7 +28,8 @@ class Model:
         self.model = LangSAM(sam_type="vit_h", ckpt_path="/mods/sam_vit_h_4b8939.pth")
         print("constructed model")
 
-    def _predict(self, raw_bytes):
+    @modal.method()
+    def predict(self, raw_bytes):
         from PIL import Image
         import cv2
         cv2.imwrite("/root/subject_file.png", raw_bytes)
@@ -48,16 +49,6 @@ class Model:
         print(phrases)
         box = [round(x) for x in boxes[0].tolist()]
         return {"rect": box, "logit": float(logits[0])}
-    
-    @modal.method()
-    def predict(self, image):
-        return self._predict(image)
-
-    @modal.method()
-    def predict_batch(self, image_list):
-        return [
-            self._predict(image) for image in image_list
-        ]
 
 
 def get_frames(file_path):
@@ -195,7 +186,7 @@ def scrape_score(filename, video_bytes):
 
     frames = get_frames(file_path)
     model = Model()
-    bboxes = model.predict_batch.remote(frames)
+    bboxes = model.predict.map(frames)
     unique_score_images = crop_and_dedupe_frames(frames, bboxes)
     return stitch_pdf(unique_score_images)
 
