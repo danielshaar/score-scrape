@@ -17,7 +17,7 @@ with segment_image.imports():
     from PIL import Image
 
 
-@app.cls(keep_warm=1, gpu="A100", image=segment_image)
+@app.cls(keep_warm=1, gpu="A100", image=segment_image, volumes={"/mods": modal.Volume.from_name("mods")})
 class Model:
     @modal.enter()
     def load_model(self):
@@ -25,7 +25,7 @@ class Model:
         from PIL import Image
         from lang_sam import LangSAM
         print("imported")
-        self.model = LangSAM()
+        self.model = LangSAM(sam_type="vit_h", ckpt_path="/mods/sam_vit_h_4b8939.pth")
         print("constructed model")
 
     def _predict(self, raw_bytes):
