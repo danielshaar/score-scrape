@@ -72,7 +72,6 @@ def scrape_score(filename, video_bytes):
 
     for i, res in enumerate(seg_results):
         x, y, w, h = res["rect"]
-        print("res", res)
         cropped_frame_path = Path(f"/cropped_frames/frame_{i}.png")
         cropped_frame_path.parent.mkdir(parents=True, exist_ok=True)
         cropped_frame = frames[i][y : y + h, x : x + w]
@@ -86,7 +85,7 @@ def scrape_score(filename, video_bytes):
 
         # TODO(dshaar): See if we can make the threshold tighter. This worked on a diverse score, but it may not on
         # repetitive scores.
-        if not previous_image_hash or image_hash - previous_image_hash > 10:
+        if not previous_image_hash or image_hash - previous_image_hash > 5:
             previous_image_hash = image_hash
             final_frame_paths.append(cropped_frame_path)
 
@@ -135,22 +134,16 @@ def scrape_score(filename, video_bytes):
     c.save()
     pdf_bytes = buffer.getvalue()
     buffer.close()
-    # for debugging
-    for res in seg_results:
-        print(res)
-    return pdf_bytes, images
+    return pdf_bytes
 
 
 @app.local_entrypoint()
 def main(filename):
     from PIL import Image
     file_path = Path(filename)
-    pdf_bytes, images = scrape_score.remote(file_path.name, file_path.read_bytes())
+    pdf_bytes = scrape_score.remote(file_path.name, file_path.read_bytes())
     output_path = Path("output.pdf")
     output_path.write_bytes(pdf_bytes)
-    for k, image in enumerate(images):
-        new_path = Path(f"frames/frame_{k}.png")
-        image.save(new_path)
 
 
 @app.cls(keep_warm=1, gpu="A100", image=segment_image)
@@ -203,5 +196,6 @@ def trim(im):
     diff = ImageChops.add(diff, diff, 2.0, -100)
     bbox = diff.getbbox()
     if bbox:
-        return im.crop(bbox)
+        tighter_bbox = (bbox[0] + 1, bbox[1] + 1, bbox[2] - 2, bbox[3] - 2)
+        return im.crop(tighter_bbox)
     
