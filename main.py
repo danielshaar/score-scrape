@@ -1,5 +1,9 @@
 import modal
 from pathlib import Path
+from PIL import Image
+
+
+app = modal.App("score-scrape")
 
 
 cuda_version = "12.4.0"
@@ -11,11 +15,66 @@ segment_image = (
     .pip_install("git+https://github.com/luca-medeiros/lang-segment-anything.git", gpu="A100")
     .apt_install("libglib2.0-0")
 )
+
+
+@app.cls(keep_warm=1, gpu="A100", image=segment_image)
+class Model:
+    @modal.enter()
+    def load_model(self):
+        print("importing")
+        from PIL import Image
+        from lang_sam import LangSAM
+        print("imported")
+        self.model = LangSAM()
+        print("constructed model")
+
+    def _predict(self, raw_bytes):
+        from PIL import Image
+        import cv2
+        cv2.imwrite("/root/subject_file.png", raw_bytes)
+        image_pil = Image.open("/root/subject_file.png").convert("RGB")
+        text_prompt = "sheet music score"
+        print("generating masks")
+
+        masks, boxes, phrases, logits = self.model.predict(image_pil, text_prompt)
+        stacked = zip(masks, boxes, phrases, logits)
+        stacked = sorted(stacked, key=lambda x: x[3], reverse=True)
+        masks, boxes, phrases, logits = zip(*stacked)
+
+        print("masks generated")
+        print(logits)
+        #print(masks)
+        print(boxes)
+        print(phrases)
+        box = [round(x) for x in boxes[0].tolist()]
+        return {"rect": box, "logit": float(logits[0])}
+    
+    @modal.method()
+    def predict(self, image):
+        return self._predict(image)
+
+    @modal.method()
+    def predict_batch(self, image_list):
+        return [
+            self._predict(image) for image in image_list
+        ]
+
+
+def trim(im):
+    from PIL import Image, ImageChops
+    bg = Image.new(im.mode, im.size)
+    diff = ImageChops.difference(im, bg)
+    diff = ImageChops.add(diff, diff, 2.0, -100)
+    bbox = diff.getbbox()
+    if bbox:
+        tighter_bbox = (bbox[0] + 1, bbox[1] + 1, bbox[2] - 2, bbox[3] - 2)
+        return im.crop(tighter_bbox)
+
+
 scrape_image = (
     modal.Image.debian_slim()
     .pip_install("imagehash", "opencv-python-headless", "pillow", "reportlab")
 )
-app = modal.App("score-scrape")
 
 
 @app.function(image=scrape_image)
@@ -139,63 +198,6 @@ def scrape_score(filename, video_bytes):
 
 @app.local_entrypoint()
 def main(filename):
-    from PIL import Image
     file_path = Path(filename)
     pdf_bytes = scrape_score.remote(file_path.name, file_path.read_bytes())
-    output_path = Path("output.pdf")
-    output_path.write_bytes(pdf_bytes)
-
-
-@app.cls(keep_warm=1, gpu="A100", image=segment_image)
-class Model:
-    @modal.enter()
-    def load_model(self):
-        print("importing")
-        from PIL import Image
-        from lang_sam import LangSAM
-        print("imported")
-        self.model = LangSAM()
-        print("constructed model")
-
-    def _predict(self, raw_bytes):
-        from PIL import Image
-        import cv2
-        cv2.imwrite("/root/subject_file.png", raw_bytes)
-        image_pil = Image.open("/root/subject_file.png").convert("RGB")
-        text_prompt = "sheet music score"
-        print("generating masks")
-
-        masks, boxes, phrases, logits = self.model.predict(image_pil, text_prompt)
-        stacked = zip(masks, boxes, phrases, logits)
-        stacked = sorted(stacked, key=lambda x: x[3], reverse=True)
-        masks, boxes, phrases, logits = zip(*stacked)
-
-        print("masks generated")
-        print(logits)
-        #print(masks)
-        print(boxes)
-        print(phrases)
-        box = [round(x) for x in boxes[0].tolist()]
-        return {"rect": box, "logit": float(logits[0])}
-    
-    @modal.method()
-    def predict(self, image):
-        return self._predict(image)
-
-    @modal.method()
-    def predict_batch(self, image_list):
-        return [
-            self._predict(image) for image in image_list
-        ]
-
-
-def trim(im):
-    from PIL import Image, ImageChops
-    bg = Image.new(im.mode, im.size)
-    diff = ImageChops.difference(im, bg)
-    diff = ImageChops.add(diff, diff, 2.0, -100)
-    bbox = diff.getbbox()
-    if bbox:
-        tighter_bbox = (bbox[0] + 1, bbox[1] + 1, bbox[2] - 2, bbox[3] - 2)
-        return im.crop(tighter_bbox)
-    
+    Path("output.pdf").write_bytes(pdf_bytes)
