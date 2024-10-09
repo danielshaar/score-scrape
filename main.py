@@ -1,6 +1,5 @@
 import modal
 from pathlib import Path
-from PIL import Image
 
 
 app = modal.App("score-scrape")
@@ -10,11 +9,12 @@ cuda_version = "12.4.0"
 os_version = "ubuntu22.04"
 segment_image = (
     modal.Image.from_registry(f"nvidia/cuda:{cuda_version}-devel-{os_version}", add_python="3.10")
-    .apt_install("clang", "git", "libgl1")
-    .pip_install("opencv-python-headless", "poetry", "torch", "torchvision", "wheel")
+    .apt_install("clang", "git", "libgl1", "libglib2.0-0")
+    .pip_install("opencv-python-headless", "pillow", "poetry", "torch", "torchvision", "wheel")
     .pip_install("git+https://github.com/luca-medeiros/lang-segment-anything.git", gpu="A100")
-    .apt_install("libglib2.0-0")
 )
+with segment_image.imports():
+    from PIL import Image
 
 
 @app.cls(keep_warm=1, gpu="A100", image=segment_image)
@@ -60,48 +60,8 @@ class Model:
         ]
 
 
-def trim(im):
-    from PIL import Image, ImageChops
-    bg = Image.new(im.mode, im.size)
-    diff = ImageChops.difference(im, bg)
-    diff = ImageChops.add(diff, diff, 2.0, -100)
-    bbox = diff.getbbox()
-    if bbox:
-        tighter_bbox = (bbox[0] + 1, bbox[1] + 1, bbox[2] - 2, bbox[3] - 2)
-        return im.crop(tighter_bbox)
-
-
-scrape_image = (
-    modal.Image.debian_slim()
-    .pip_install("imagehash", "opencv-python-headless", "pillow", "reportlab")
-)
-
-
-@app.function(image=scrape_image)
-def scrape_score(filename, video_bytes):
+def get_frames(file_path):
     import cv2
-    import imagehash
-    import numpy as np
-    import os
-    import tempfile
-    from PIL import Image
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import mm
-    from reportlab.lib.pagesizes import A4
-    from io import BytesIO
-
-    def resize_image(img, target_width):
-        img_w, img_h = img.size
-        if img_w > target_width:
-            scale_factor = target_width / img_w
-            img_w = target_width
-            img_h = int(img_h * scale_factor)
-            img = img.resize((int(img_w), img_h), Image.LANCZOS)
-        return img
-
-    file_path = Path(f"/videos/{filename}")
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_bytes(video_bytes)
 
     cap = cv2.VideoCapture(file_path)
     frame_count = 0
@@ -120,37 +80,62 @@ def scrape_score(filename, video_bytes):
         frames.append(frame)
 
     cap.release()
+    return frames
 
-    # Crop and dedupe frames.
-    i = 0
+
+def remove_border(score_segment_image):
+    from PIL import ImageChops
+
+    # Find the bounding box of the non-black pixels.
+    blank_background = Image.new(score_segment_image.mode, score_segment_image.size)
+    diff = ImageChops.difference(score_segment_image, blank_background)
+    diff = ImageChops.add(diff, diff, 2.0, -100)
+    bbox = diff.getbbox()
+
+    # If we found a bounding box, tighten it up by one pixel to remove the border.
+    if bbox:
+        no_border_bbox = (bbox[0] + 1, bbox[1] + 1, bbox[2] - 2, bbox[3] - 2)
+        return score_segment_image.crop(no_border_bbox)
+
+
+def crop_and_dedupe_frames(frames, bboxes):
+    import imagehash
+
     previous_image_hash = None
-    final_frame_paths = []
-    model = Model()
+    unique_score_images = []
+    for i, bbox in enumerate(bboxes):
+        x, y, w, h = bbox["rect"]
+        score_segment_image = Image.fromarray(frames[i][y : y + h, x : x + w])
+        trimmed_score_image = remove_border(score_segment_image)
+        if trimmed_score_image:
+            image_hash = imagehash.whash(trimmed_score_image)
 
-    seg_results = model.predict_batch.remote(frames)
+            # TODO(dshaar): See if we can make the threshold tighter. This worked on a diverse score, but it may not on
+            # repetitive scores.
+            if not previous_image_hash or image_hash - previous_image_hash > 5:
+                previous_image_hash = image_hash
+                unique_score_images.append(trimmed_score_image)
 
-    for i, res in enumerate(seg_results):
-        x, y, w, h = res["rect"]
-        cropped_frame_path = Path(f"/cropped_frames/frame_{i}.png")
-        cropped_frame_path.parent.mkdir(parents=True, exist_ok=True)
-        cropped_frame = frames[i][y : y + h, x : x + w]
-        cropped_frame2 = trim(Image.fromarray(cropped_frame))
-        if cropped_frame2:
-            cropped_frame = cropped_frame2
-
-        cropped_frame = np.array(cropped_frame)
-        cv2.imwrite(cropped_frame_path, cropped_frame)
-        image_hash = imagehash.whash(Image.open(cropped_frame_path))
-
-        # TODO(dshaar): See if we can make the threshold tighter. This worked on a diverse score, but it may not on
-        # repetitive scores.
-        if not previous_image_hash or image_hash - previous_image_hash > 5:
-            previous_image_hash = image_hash
-            final_frame_paths.append(cropped_frame_path)
+    return unique_score_images
 
 
-    # Open all images
-    images = [Image.open(img) for img in final_frame_paths]
+def resize_image(img, target_width):
+        img_w, img_h = img.size
+        if img_w > target_width:
+            scale_factor = target_width / img_w
+            img_w = target_width
+            img_h = int(img_h * scale_factor)
+            img = img.resize((int(img_w), img_h), Image.LANCZOS)
+        return img
+
+
+def stitch_pdf(unique_score_images):
+    import os
+    import tempfile
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+    from reportlab.lib.pagesizes import A4
+    from io import BytesIO
 
     # Create a new PDF
     pdf_filename = "stitched_image.pdf"
@@ -162,7 +147,7 @@ def scrape_score(filename, video_bytes):
     page_height_left = pdf_h
     page_number = 1
 
-    for img in images:
+    for img in unique_score_images:
         # Resize the image to the width of the PDF page
         img = resize_image(img, pdf_w)
         img_w, img_h = img.size
@@ -194,6 +179,25 @@ def scrape_score(filename, video_bytes):
     pdf_bytes = buffer.getvalue()
     buffer.close()
     return pdf_bytes
+
+
+scrape_image = (
+    modal.Image.debian_slim(python_version="3.10")
+    .pip_install("imagehash", "opencv-python-headless", "pillow", "reportlab")
+)
+
+
+@app.function(image=scrape_image)
+def scrape_score(filename, video_bytes):
+    file_path = Path(f"/videos/{filename}")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(video_bytes)
+
+    frames = get_frames(file_path)
+    model = Model()
+    bboxes = model.predict_batch.remote(frames)
+    unique_score_images = crop_and_dedupe_frames(frames, bboxes)
+    return stitch_pdf(unique_score_images)
 
 
 @app.local_entrypoint()
