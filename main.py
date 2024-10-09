@@ -2,8 +2,18 @@ import modal
 from pathlib import Path
 
 
-scrape_image = modal.Image.debian_slim().pip_install(
-    "imagehash", "opencv-python-headless", "pillow", "reportlab"
+cuda_version = "12.4.0"
+os_version = "ubuntu22.04"
+segment_image = (
+    modal.Image.from_registry(f"nvidia/cuda:{cuda_version}-devel-{os_version}", add_python="3.10")
+    .apt_install("clang", "git", "libgl1")
+    .pip_install("opencv-python-headless", "poetry", "torch", "torchvision", "wheel")
+    .pip_install("git+https://github.com/luca-medeiros/lang-segment-anything.git", gpu="A100")
+    .apt_install("libglib2.0-0")
+)
+scrape_image = (
+    modal.Image.debian_slim()
+    .pip_install("imagehash", "opencv-python-headless", "pillow", "reportlab")
 )
 app = modal.App("score-scrape")
 
@@ -141,31 +151,9 @@ def main(filename):
     for k, image in enumerate(images):
         new_path = Path(f"frames/frame_{k}.png")
         image.save(new_path)
-        
 
 
-seg_image = (
-    modal.Image.debian_slim()
-    .apt_install('git')
-    .apt_install('wget')    
-    .apt_install(['libglib2.0-0', 'libsm6', 'libxrender1', 'libxext6', 'libgl1'])
-    .run_commands([
-        "wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb",
-        "dpkg -i cuda-keyring_1.1-1_all.deb",
-        "apt-get update",
-        "apt-get -y install cuda-toolkit-12-4",
-        ])
-    .env({'CUDA_HOME': '/usr/local/cuda-12.4'})
-    .pip_install("torch", "torchvision", "opencv-python-headless") 
-    .run_commands([
-        "echo $CUDA_HOME",
-        "ls -l $CUDA_HOME",
-        "cd /root && git clone https://github.com/luca-medeiros/lang-segment-anything",
-        "cd /root/lang-segment-anything && pip install -e .",
-    ], gpu="A100")
-)
-
-@app.cls(keep_warm=1, gpu="A100", image=seg_image)
+@app.cls(keep_warm=1, gpu="A100", image=segment_image)
 class Model:
     @modal.enter()
     def load_model(self):
