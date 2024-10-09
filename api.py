@@ -1,14 +1,14 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import base64
 
 from modal.functions import FunctionCall
 
-from main import scrape_score
+from main import scrape_score, app
 
-from modal import App, asgi_app
+from modal import asgi_app
 
-api_app = App("api")
 web_app = FastAPI()
 
 web_app.add_middleware(
@@ -20,7 +20,7 @@ web_app.add_middleware(
 )
 
 
-@api_app.function()
+@app.function()
 @asgi_app()
 def fastapi_app():
     return web_app
@@ -30,9 +30,8 @@ def fastapi_app():
 async def accept_video(video: UploadFile = File(...)):
     video_bytes = await video.read()
 
-    call = scrape_score.spawn(video_bytes)
-    print("this is the call:", call)
-    return {"call_id": call.object_id}
+    call = scrape_score.spawn(video.filename, video_bytes)
+    return call.object_id
 
 
 @web_app.get("/result/{call_id}")
@@ -40,8 +39,8 @@ async def poll_results(call_id: str):
     function_call = FunctionCall.from_id(call_id)
     try:
         result = function_call.get(timeout=0)
-        print("result:", result)
-        return {"markdown": result}
+        markdown = base64.b64encode(result)
+        return {"markdown": markdown}
     except TimeoutError:
         return JSONResponse({"status": "processing"}, status_code=202)
 
