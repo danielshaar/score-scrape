@@ -12,6 +12,7 @@ app = modal.App("score-scrape")
 def scrape_score(filename, video_bytes):
     import cv2
     import imagehash
+    import numpy as np
     import os
     import tempfile
     from PIL import Image
@@ -56,17 +57,20 @@ def scrape_score(filename, video_bytes):
     previous_image_hash = None
     final_frame_paths = []
     model = Model()
-    #model = modal.Cls.lookup("score-scrape", "Model")
-    for res in model.predict.map(frames):
+
+    seg_results = model.predict_batch.remote(frames)
+
+    for i, res in enumerate(seg_results):
         x, y, w, h = res["rect"]
-        score = res["logit"]
         print("res", res)
         cropped_frame_path = Path(f"/cropped_frames/frame_{i}.png")
         cropped_frame_path.parent.mkdir(parents=True, exist_ok=True)
         cropped_frame = frames[i][y : y + h, x : x + w]
-        x2, y2, w2, h2 = remove_black_border(cropped_frame)
-        cropped_frame = cropped_frame[y2 : y2 + h2, x2 : x2 + w2]
-        
+        cropped_frame2 = trim(Image.fromarray(cropped_frame))
+        if cropped_frame2:
+            cropped_frame = cropped_frame2
+
+        cropped_frame = np.array(cropped_frame)
         cv2.imwrite(cropped_frame_path, cropped_frame)
         image_hash = imagehash.whash(Image.open(cropped_frame_path))
 
@@ -76,7 +80,6 @@ def scrape_score(filename, video_bytes):
             previous_image_hash = image_hash
             final_frame_paths.append(cropped_frame_path)
 
-        i += 1
 
     # Open all images
     images = [Image.open(img) for img in final_frame_paths]
@@ -122,6 +125,9 @@ def scrape_score(filename, video_bytes):
     c.save()
     pdf_bytes = buffer.getvalue()
     buffer.close()
+    # for debugging
+    for res in seg_results:
+        print(res)
     return pdf_bytes, images
 
 
@@ -170,44 +176,44 @@ class Model:
         self.model = LangSAM()
         print("constructed model")
 
-    @modal.method()
-    def predict(self, raw_bytes):
+    def _predict(self, raw_bytes):
         from PIL import Image
         import cv2
         cv2.imwrite("/root/subject_file.png", raw_bytes)
         image_pil = Image.open("/root/subject_file.png").convert("RGB")
-        text_prompt = "sheet music score page on a white background"
+        text_prompt = "sheet music score"
         print("generating masks")
 
         masks, boxes, phrases, logits = self.model.predict(image_pil, text_prompt)
+        stacked = zip(masks, boxes, phrases, logits)
+        stacked = sorted(stacked, key=lambda x: x[3], reverse=True)
+        masks, boxes, phrases, logits = zip(*stacked)
 
         print("masks generated")
         print(logits)
-        print(masks)
+        #print(masks)
         print(boxes)
+        print(phrases)
         box = [round(x) for x in boxes[0].tolist()]
         return {"rect": box, "logit": float(logits[0])}
+    
+    @modal.method()
+    def predict(self, image):
+        return self._predict(image)
+
+    @modal.method()
+    def predict_batch(self, image_list):
+        return [
+            self._predict(image) for image in image_list
+        ]
 
 
-
-def remove_black_border(image):
-    import cv2
-    import numpy as np
-    image = np.array(image)
-    image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(image_gray, 1, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    biggest = np.array([])
-    max_area = 0
-    for cntrs in contours:
-        area = cv2.contourArea(cntrs)
-        peri = cv2.arcLength(cntrs, True)
-        approx = cv2.approxPolyDP(cntrs, 0.02 * peri, True)
-        if area > max_area and len(approx) == 4:
-            biggest = approx
-            max_area = area
-    cnt = biggest
-    x, y, w, h = cv2.boundingRect(cnt)
-    return x,y,w,h
-    #crop = image[y : y + h, x : x + w]
-    #return crop
+def trim(im):
+    from PIL import Image, ImageChops
+    bg = Image.new(im.mode, im.size)
+    diff = ImageChops.difference(im, bg)
+    diff = ImageChops.add(diff, diff, 2.0, -100)
+    bbox = diff.getbbox()
+    if bbox:
+        return im.crop(bbox)
+    
