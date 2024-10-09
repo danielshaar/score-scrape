@@ -8,12 +8,6 @@ scrape_image = modal.Image.debian_slim().pip_install(
 app = modal.App("score-scrape")
 
 
-@app.function()
-def score_bounding_box(frame):
-    # TODO(sam): Implement.
-    return [1250, 0, 1200, 900]
-
-
 @app.function(image=scrape_image)
 def scrape_score(filename, video_bytes):
     import cv2
@@ -61,7 +55,10 @@ def scrape_score(filename, video_bytes):
     i = 0
     previous_image_hash = None
     final_frame_paths = []
-    for x, y, w, h in score_bounding_box.map(frames):
+    model = modal.Cls.lookup("score-scrape", "Model")
+    for res in model.predict.map(frames):
+        x, y, w, h = res["rect"]
+        score = res["logit"]
         cropped_frame_path = Path(f"/cropped_frames/frame_{i}.png")
         cropped_frame_path.parent.mkdir(parents=True, exist_ok=True)
         cropped_frame = frames[i][y : y + h, x : x + w]
@@ -129,3 +126,55 @@ def main(filename):
     pdf_bytes = scrape_score.remote(file_path.name, file_path.read_bytes())
     output_path = Path("output.pdf")
     output_path.write_bytes(pdf_bytes)
+
+
+seg_image = (
+    modal.Image.debian_slim()
+    .apt_install('git')
+    .apt_install('wget')    
+    .apt_install(['libglib2.0-0', 'libsm6', 'libxrender1', 'libxext6', 'libgl1'])
+    .run_commands([
+        "wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb",
+        "dpkg -i cuda-keyring_1.1-1_all.deb",
+        "apt-get update",
+        "apt-get -y install cuda-toolkit-12-4",
+        ])
+    .env({'CUDA_HOME': '/usr/local/cuda-12.4'})
+    .pip_install("torch", "torchvision", "opencv-python-headless") 
+    .run_commands([
+        "echo $CUDA_HOME",
+        "ls -l $CUDA_HOME",
+        "cd /root && git clone https://github.com/luca-medeiros/lang-segment-anything",
+        "cd /root/lang-segment-anything && pip install -e .",
+    ], gpu="A100")
+)
+
+@app.cls(keep_warm=1, gpu="A100", image=seg_image)
+class Model:
+    @modal.enter()
+    def load_model(self):
+        print("importing")
+        from PIL import Image
+        from lang_sam import LangSAM
+        print("imported")
+        self.model = LangSAM()
+        print("constructed model")
+
+    @modal.method()
+    def predict(self, raw_bytes):
+        from PIL import Image
+        import cv2
+        cv2.imwrite("/root/subject_file.png", raw_bytes)
+        image_pil = Image.open("/root/subject_file.png").convert("RGB")
+        text_prompt = "sheet music score page"
+        print("generating masks")
+
+        masks, boxes, phrases, logits = self.model.predict(image_pil, text_prompt)
+
+        print("masks generated")
+        print(logits)
+        print(masks)
+        print(boxes)
+        box = [round(x) for x in boxes[0].tolist()]
+        return {"rect": box, "logit": float(logits[0])}
+
