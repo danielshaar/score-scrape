@@ -131,7 +131,7 @@ def stitch_pdf(unique_score_images):
         w, h = score_image.size
 
         # If we can't fit another image on the page, draw the page.
-        if page_h_left - h < -5:
+        if page_h_left - h < -10:
             draw_page(c, page_images, page_h_left)
             c.showPage()
             page_h_left = page_h
