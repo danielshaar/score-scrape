@@ -87,8 +87,6 @@ def crop_and_dedupe_frames(frames, bboxes):
         if trimmed_score_image:
             image_hash = imagehash.whash(trimmed_score_image)
 
-            # TODO(dshaar): See if we can make the threshold tighter. This worked on a diverse score, but it may not on
-            # repetitive scores.
             if not previous_image_hash or image_hash - previous_image_hash > 5:
                 previous_image_hash = image_hash
                 unique_score_images.append(trimmed_score_image)
