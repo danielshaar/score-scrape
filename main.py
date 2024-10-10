@@ -10,47 +10,32 @@ os_version = "ubuntu22.04"
 segment_image = (
     modal.Image.from_registry(f"nvidia/cuda:{cuda_version}-devel-{os_version}", add_python="3.10")
     .apt_install("clang", "git", "libgl1", "libglib2.0-0")
-    .pip_install("opencv-python-headless", "pillow", "poetry", "torch", "torchvision", "wheel")
+    .pip_install("pillow", "poetry", "torch", "torchvision", "wheel")
     .pip_install("git+https://github.com/luca-medeiros/lang-segment-anything.git", gpu="A100")
 )
 with segment_image.imports():
     from PIL import Image
 
 
-@app.cls(keep_warm=1, concurrency_limit=20, gpu="A100", image=segment_image, volumes={"/mods": modal.Volume.from_name("mods")})
-class Model:
+@app.cls(
+    keep_warm=1,
+    concurrency_limit=20,
+    gpu="A100",
+    image=segment_image,
+    volumes={"/mods": modal.Volume.from_name("mods")}
+)
+class ExtractScoreModel:
     @modal.enter()
     def load_model(self):
-        print("importing")
-        from PIL import Image
         from lang_sam import LangSAM
-        print("imported")
+
         self.model = LangSAM(sam_type="vit_h", ckpt_path="/mods/sam_vit_h_4b8939.pth")
-        print("constructed model")
 
     @modal.method()
-    def predict(self, raw_bytes):
-        from PIL import Image
-        import cv2
-        cv2.imwrite("/root/subject_file.png", raw_bytes)
-        image_pil = Image.open("/root/subject_file.png").convert("RGB")
-        text_prompt = "sheet music score"
-        print("generating masks")
-
-        masks, boxes, phrases, logits = self.model.predict(image_pil, text_prompt)
-        scores = [logits[k] * boxes[k][2] * boxes[k][3] for k in range(len(boxes))]
-        stacked = zip(masks, boxes, phrases, logits, scores)
-        stacked = sorted(stacked, key=lambda x: x[1][2] * x[1][3], reverse=True)
-        masks, boxes, phrases, logits, scores = zip(*stacked)
-
-        print("masks generated")
-        print(logits)
-        #print(masks)
-        print(boxes)
-        print(phrases)
-        print(scores)
-        box = [round(x) for x in boxes[0].tolist()]
-        return {"rect": box, "logit": float(logits[0])}
+    def predict(self, frame):
+        bboxes = self.model.predict(Image.fromarray(frame).convert("RGB"), "sheet music score")[1]
+        largest_bbox = sorted(bboxes, key=lambda bbox: bbox[2] * bbox[3], reverse=True)[0]
+        return [round(x) for x in largest_bbox.tolist()]
 
 
 def get_frames(file_path):
@@ -96,8 +81,7 @@ def crop_and_dedupe_frames(frames, bboxes):
 
     previous_image_hash = None
     unique_score_images = []
-    for i, bbox in enumerate(bboxes):
-        x, y, w, h = bbox["rect"]
+    for i, (x, y, w, h) in enumerate(bboxes):
         score_segment_image = Image.fromarray(frames[i][y : y + h, x : x + w])
         trimmed_score_image = remove_border(score_segment_image)
         if trimmed_score_image:
@@ -179,8 +163,8 @@ def scrape_score(filename, video_bytes):
     file_path.write_bytes(video_bytes)
 
     frames = get_frames(file_path)
-    model = Model()
-    bboxes = model.predict.map(frames)
+    extract_score_model = ExtractScoreModel()
+    bboxes = extract_score_model.predict.map(frames)
     unique_score_images = crop_and_dedupe_frames(frames, bboxes)
     return stitch_pdf(unique_score_images)
 
