@@ -11,7 +11,7 @@ segment_image = (
     modal.Image.from_registry(f"nvidia/cuda:{cuda_version}-devel-{os_version}", add_python="3.10")
     .apt_install("clang", "git", "libgl1", "libglib2.0-0")
     .pip_install("pillow", "poetry", "torch", "torchvision", "wheel")
-    .pip_install("git+https://github.com/luca-medeiros/lang-segment-anything.git", gpu="A100")
+    .pip_install("git+https://github.com/luca-medeiros/lang-segment-anything.git", gpu="A10G")
 )
 with segment_image.imports():
     from PIL import Image
@@ -19,8 +19,8 @@ with segment_image.imports():
 
 @app.cls(
     keep_warm=1,
-    concurrency_limit=20,
-    gpu="A100",
+    concurrency_limit=2,
+    gpu="A10G",
     image=segment_image,
     volumes={"/mods": modal.Volume.from_name("mods")}
 )
