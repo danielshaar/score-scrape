@@ -39,8 +39,8 @@ async def poll_results(call_id: str):
     function_call = FunctionCall.from_id(call_id)
     try:
         result = function_call.get(timeout=0)
-        markdown = base64.b64encode(result)
-        return {"markdown": markdown}
+        pdfBytes = base64.b64encode(result)
+        return {"pdfBytes": pdfBytes}
     except TimeoutError:
         return JSONResponse({"status": "processing"}, status_code=202)
 
